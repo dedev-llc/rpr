@@ -1,0 +1,190 @@
+name: release
+
+# Auto-publishes rpr to PyPI, npm, and the Homebrew tap whenever a merge to
+# main bumps the version in pyproject.toml. The workflow is a no-op if the
+# version hasn't changed (i.e. v<version> is already tagged).
+#
+# Required secrets (Settings → Secrets and variables → Actions):
+#   PYPI_API_TOKEN      — pypi.org token (scope: project rpr, or whole-account
+#                         until the project exists). __token__ user is implied.
+#   NPM_TOKEN           — npmjs.com automation token with publish rights.
+#   HOMEBREW_TAP_TOKEN  — fine-grained PAT with Contents: read/write on
+#                         dedev-llc/homebrew-rpr. Used to commit the bumped
+#                         formula to the tap repo.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      should_release: ${{ steps.v.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: v
+        name: Read version and check if already released
+        run: |
+          set -euo pipefail
+          py_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          npm_version=$(node -p "require('./npm/package.json').version")
+
+          if [ "$py_version" != "$npm_version" ]; then
+            echo "::error::Version mismatch — pyproject.toml=$py_version, npm/package.json=$npm_version. Bump both."
+            exit 1
+          fi
+
+          echo "version=$py_version" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse --verify "refs/tags/v$py_version" >/dev/null 2>&1; then
+            echo "v$py_version already tagged — nothing to release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$py_version is new — proceeding."
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  pypi:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Validate distributions
+        run: twine check dist/*
+
+      - name: Upload to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*
+
+  npm:
+    needs: [check-version, pypi]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish to npm
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  homebrew:
+    needs: [check-version, pypi]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Wait for PyPI to expose new version
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -sSf "https://pypi.org/pypi/rpr/${VERSION}/json" >/dev/null; then
+              echo "PyPI has rpr ${VERSION}"
+              exit 0
+            fi
+            echo "Waiting for PyPI propagation... (${i}/30)"
+            sleep 10
+          done
+          echo "::error::PyPI never exposed rpr ${VERSION}"
+          exit 1
+
+      - name: Resolve sdist URL and sha256
+        id: sdist
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          json=$(curl -sSf "https://pypi.org/pypi/rpr/${VERSION}/json")
+          url=$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin)["urls"]; s=[x for x in d if x["packagetype"]=="sdist"][0]; print(s["url"])')
+          sha=$(echo "$json" | python3 -c 'import json,sys; d=json.load(sys.stdin)["urls"]; s=[x for x in d if x["packagetype"]=="sdist"][0]; print(s["digests"]["sha256"])')
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: dedev-llc/homebrew-rpr
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update Formula/rpr.rb
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+          URL: ${{ steps.sdist.outputs.url }}
+          SHA: ${{ steps.sdist.outputs.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, re
+          formula = pathlib.Path("tap/Formula/rpr.rb")
+          text = formula.read_text()
+          text = re.sub(r'^(\s*)url\s+".*"',    rf'\1url "{os.environ["URL"]}"', text, count=1, flags=re.M)
+          text = re.sub(r'^(\s*)sha256\s+".*"', rf'\1sha256 "{os.environ["SHA"]}"', text, count=1, flags=re.M)
+          formula.write_text(text)
+          PY
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/rpr.rb
+          git commit -m "rpr ${VERSION}"
+          git push
+
+  tag-and-release:
+    needs: [check-version, pypi, npm, homebrew]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag and create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
+          gh release create "v${VERSION}" --generate-notes --title "v${VERSION}"
