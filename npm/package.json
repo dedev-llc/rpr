@@ -1,0 +1,35 @@
+{
+  "name": "rpr",
+  "version": "0.1.0",
+  "description": "Stealth PR reviewer — looks like you wrote every word.",
+  "keywords": [
+    "pr",
+    "review",
+    "github",
+    "claude",
+    "ai",
+    "code-review"
+  ],
+  "homepage": "https://github.com/dedev-llc/rpr",
+  "bugs": "https://github.com/dedev-llc/rpr/issues",
+  "license": "MIT",
+  "author": "dedev-llc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dedev-llc/rpr.git"
+  },
+  "bin": {
+    "rpr": "./bin/rpr.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "scripts": {
+    "prepack": "node scripts/copy-python.js"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}

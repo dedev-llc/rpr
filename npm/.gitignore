@@ -1,0 +1,6 @@
+# Bundled Python source — populated by scripts/copy-python.js at prepack time.
+lib/
+
+# npm artifacts
+node_modules/
+*.tgz
