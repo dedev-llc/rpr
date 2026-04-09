@@ -81,6 +81,25 @@ gh pr create --fill            # review, merge — workflow publishes to PyPI, n
 
 The workflow's preflight check fails fast if the three version files drift, so always use `scripts/bump.sh` rather than editing them by hand. See the **Publishing** section of [README.md](README.md#publishing-maintainer-notes) for the secrets and one-time setup the workflow depends on.
 
+## Branch protection (maintainers only)
+
+The `main` branch is protected by a ruleset defined in [`scripts/setup-branch-protection.sh`](scripts/setup-branch-protection.sh). The ruleset enforces:
+
+- No deletion of `main`, no force-pushes
+- Linear history (squash or rebase merges only)
+- All changes go through a pull request
+- All CI checks in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) must pass before merge
+- Conversations resolved before merge
+- Org admins (i.e. maintainers) may bypass in an emergency
+
+GitHub gates rulesets behind a paid plan for **private** repos. While the repo is private, the script can't apply the ruleset (CI still runs on PRs, but the rules aren't enforced). After flipping the repo to public:
+
+```bash
+scripts/setup-branch-protection.sh
+```
+
+The script is idempotent — re-run it any time you add or remove CI jobs (just update the `REQUIRED_CHECKS` array first).
+
 ## Questions
 
 Open an issue with the `question` label, or start a discussion if discussions are enabled on the repo.

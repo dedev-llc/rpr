@@ -1,0 +1,105 @@
+name: ci
+
+# Runs on every PR targeting main, plus pushes to main itself. The job names
+# below are referenced by name in scripts/setup-branch-protection.sh — if you
+# rename a job, update the ruleset script too.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Verify cli.py imports and --help works
+        run: python src/rpr/cli.py --help > /dev/null
+
+      - name: Editable install + module entry point
+        run: |
+          pip install -e .
+          python -c "import rpr; print('rpr', rpr.__version__)"
+          rpr --help > /dev/null
+          python -m rpr --help > /dev/null
+
+  version-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Verify pyproject.toml, npm/package.json and __init__.py agree
+        run: |
+          set -euo pipefail
+          py_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          npm_version=$(node -p "require('./npm/package.json').version")
+          init_version=$(python3 -c 'import re,pathlib; m=re.search(r"__version__\s*=\s*\"([^\"]+)\"", pathlib.Path("src/rpr/__init__.py").read_text()); print(m.group(1) if m else "MISSING")')
+
+          echo "pyproject.toml      = $py_version"
+          echo "npm/package.json    = $npm_version"
+          echo "src/rpr/__init__.py = $init_version"
+
+          if [ "$py_version" != "$npm_version" ] || [ "$py_version" != "$init_version" ]; then
+            echo "::error::Version mismatch — use scripts/bump.sh to update all three files in lockstep"
+            exit 1
+          fi
+
+  json-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate JSON files
+        run: |
+          set -euo pipefail
+          for f in examples/config.json npm/package.json; do
+            python3 -c "import json,sys; json.load(open('$f'))"
+            echo "ok: $f"
+          done
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run shellcheck on shell scripts
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck install.sh scripts/bump.sh scripts/setup-branch-protection.sh
+
+  npm-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm pack --dry-run (exercises prepack hook)
+        working-directory: npm
+        run: npm pack --dry-run
