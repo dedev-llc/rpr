@@ -11,10 +11,12 @@ This is the npm distribution of `rpr`. It bundles the Python source and runs it 
 ## Install
 
 ```bash
-npm install -g rpr
+npm install -g @dedev-llc/rpr
 # or
-npx rpr <pr-number>
+npx @dedev-llc/rpr <pr-number>
 ```
+
+After install, the CLI is just `rpr` — the scope only affects the install command, not the binary name.
 
 ## Usage
 
@@ -31,3 +33,5 @@ See the [main repo](https://github.com/dedev-llc/rpr) for full docs and configur
 ## Why a Node wrapper around Python?
 
 `rpr` is written in Python (stdlib only). The npm package is a thin Node shim that finds your `python3` and execs the bundled CLI. If you're already a Python user, install via `pipx install rpr` instead — it's more idiomatic.
+
+The npm package is published under the `@dedev-llc` scope because the unscoped `rpr` name was already taken on the npm registry by an unrelated package.

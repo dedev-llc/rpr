@@ -1,5 +1,5 @@
 {
-  "name": "rpr",
+  "name": "@dedev-llc/rpr",
   "version": "0.1.0",
   "description": "Stealth PR reviewer — looks like you wrote every word.",
   "keywords": [
@@ -19,7 +19,7 @@
     "url": "git+https://github.com/dedev-llc/rpr.git"
   },
   "bin": {
-    "rpr": "./bin/rpr.js"
+    "rpr": "bin/rpr.js"
   },
   "files": [
     "bin/",
