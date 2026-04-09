@@ -49,9 +49,10 @@ jobs:
           set -euo pipefail
           py_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
           npm_version=$(node -p "require('./npm/package.json').version")
+          init_version=$(python3 -c 'import re,pathlib; m=re.search(r"__version__\s*=\s*\"([^\"]+)\"", pathlib.Path("src/rpr/__init__.py").read_text()); print(m.group(1) if m else "MISSING")')
 
-          if [ "$py_version" != "$npm_version" ]; then
-            echo "::error::Version mismatch — pyproject.toml=$py_version, npm/package.json=$npm_version. Bump both."
+          if [ "$py_version" != "$npm_version" ] || [ "$py_version" != "$init_version" ]; then
+            echo "::error::Version mismatch — pyproject.toml=$py_version, npm/package.json=$npm_version, src/rpr/__init__.py=$init_version. Use scripts/bump.sh to bump all three."
             exit 1
           fi
 

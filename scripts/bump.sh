@@ -48,6 +48,19 @@ if n != 1:
 p.write_text(s)
 PY
 
+# src/rpr/__init__.py — surgical replace of the __version__ line.
+NEW="$new" python3 - <<'PY'
+import os, pathlib, re
+p = pathlib.Path("src/rpr/__init__.py")
+s = p.read_text()
+s, n = re.subn(r'^__version__\s*=\s*"[^"]+"',
+               f'__version__ = "{os.environ["NEW"]}"',
+               s, count=1, flags=re.M)
+if n != 1:
+    raise SystemExit("error: could not find '__version__ = ...' line in src/rpr/__init__.py")
+p.write_text(s)
+PY
+
 # npm/package.json — preserve 2-space indent and trailing newline.
 NEW="$new" node -e '
 const fs = require("fs");
@@ -60,6 +73,7 @@ fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
 echo
 echo "Updated:"
 echo "  pyproject.toml"
+echo "  src/rpr/__init__.py"
 echo "  npm/package.json"
 echo
 echo "Next steps:"
