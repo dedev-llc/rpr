@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Stealth PR Reviewer — looks like you wrote every word.
 
@@ -9,6 +10,10 @@ Usage:
     rpr 42 --approve                # Post review + approve the PR
     rpr 42 --request-changes        # Post review + request changes
 """
+
+# Postpones evaluation of annotations so PEP 604 syntax (e.g. `str | None`)
+# works on Python 3.9 — required because pyproject.toml declares >= 3.9.
+from __future__ import annotations
 
 import argparse
 import json
@@ -27,7 +32,6 @@ DEFAULT_CONFIG = {
     "model": "claude-opus-4-6",
     "max_tokens": 16000,
     "max_diff_chars": 120000,
-    "review_style": "senior_engineer",
     "skip_patterns": [
         "*.lock",
         "*.g.dart",

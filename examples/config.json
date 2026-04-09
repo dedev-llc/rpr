@@ -2,7 +2,6 @@
   "model": "claude-opus-4-6",
   "max_tokens": 16000,
   "max_diff_chars": 120000,
-  "review_style": "senior_engineer",
   "skip_patterns": [
     "*.lock",
     "*.g.dart",

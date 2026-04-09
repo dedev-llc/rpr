@@ -6,7 +6,7 @@ AI-powered PR reviews that look like you wrote them. No GitHub Apps, no bots, no
 
 1. Fetches the PR diff from GitHub
 2. Sends it to Claude with a prompt engineered to sound like a senior engineer (not AI)
-3. Posts the review under **your GitHub account**  inline comments on specific lines
+3. Posts the review under **your GitHub account** — inline comments on specific lines
 
 Nobody can tell the difference.
 
@@ -134,43 +134,33 @@ Run as a module: `python -m rpr 42 --dry-run`
 
 ## Publishing (maintainer notes)
 
-The PyPI package is the source of truth. Other channels wrap it.
+Releases are fully automated by [`.github/workflows/release.yml`](.github/workflows/release.yml). Merging a version bump to `main` publishes to PyPI, npm, and the Homebrew tap in one shot, then tags `v<version>` and cuts a GitHub release. Merges that don't change the version are no-ops.
 
-### PyPI
-
-```bash
-pip install build twine
-python -m build                              # produces dist/rpr-X.Y.Z.tar.gz + .whl
-twine upload dist/*                          # requires PyPI account + token
-```
-
-### Homebrew formula
-
-After publishing to PyPI, update `Formula/rpr.rb`:
+### Cutting a release
 
 ```bash
-SHA=$(curl -sL https://files.pythonhosted.org/packages/source/r/rpr/rpr-0.1.0.tar.gz | shasum -a 256 | cut -d' ' -f1)
-# Edit Formula/rpr.rb: replace the placeholder sha256 with $SHA, bump version in url
-git commit -am "brew: bump rpr to 0.1.0" && git push
+scripts/bump.sh 0.1.2          # updates pyproject.toml, npm/package.json, src/rpr/__init__.py
+git checkout -b release/v0.1.2
+git commit -am "Release v0.1.2"
+gh pr create --fill            # review, merge — workflow does the rest
 ```
 
-Users install via: `brew install dedev-llc/rpr/rpr`
+That's it. The workflow:
 
-### npm
+1. Reads the new version, fails fast if the three files disagree, skips if `v0.1.2` is already tagged
+2. Builds + uploads the sdist/wheel to PyPI via **Trusted Publishing** (OIDC, no token)
+3. Publishes `@dedev-llc/rpr` to npm (the `prepack` hook bundles `src/rpr/*.py` into `npm/lib/`)
+4. Resolves the real PyPI sdist URL+sha256, rewrites `Formula/rpr.rb` in the [`dedev-llc/homebrew-rpr`](https://github.com/dedev-llc/homebrew-rpr) tap, and pushes
+5. Tags `v0.1.2` on this repo and creates a GitHub release with auto-generated notes
 
-```bash
-cd npm
-npm version 0.1.0 --no-git-tag-version       # match pyproject.toml version
-npm pack --dry-run                           # sanity check: should list bin/ + lib/
-npm publish                                  # requires npm login
-```
+### Required secrets and one-time setup
 
-The `prepack` hook copies `src/rpr/*.py` into `npm/lib/` automatically.
+- **`NPM_TOKEN`** — Automation token for `@dedev-llc` org publish rights
+- **`HOMEBREW_TAP_TOKEN`** — Fine-grained PAT, `Contents: read/write` on `dedev-llc/homebrew-rpr`
+- **PyPI Trusted Publisher** — Configured at https://pypi.org/manage/account/publishing/ with workflow `release.yml` and environment `release`
+- **`release` GitHub Environment** — Repo Settings → Environments → New environment → name `release`
+- **`dedev-llc/homebrew-rpr` repo** — Must exist with a seed `Formula/rpr.rb` committed before the first run
 
-### Release checklist
+### Manual fallback (rarely needed)
 
-1. Bump version in `pyproject.toml`, `src/rpr/__init__.py`, `npm/package.json`, `Formula/rpr.rb` (`url`)
-2. Tag: `git tag v0.1.0 && git push --tags`
-3. Publish to PyPI (above)
-4. Update Homebrew formula sha256 (above)
-5. Publish to npm (above)
+If the workflow can't run for some reason, you can publish by hand. The `pypi` step is `python -m build && twine upload dist/*` (with a PyPI API token), `npm publish --access public` runs from the `npm/` dir, and the Homebrew formula update is whatever the workflow's `homebrew` job does — see [`.github/workflows/release.yml`](.github/workflows/release.yml) as the canonical reference.
