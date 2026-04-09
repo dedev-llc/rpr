@@ -72,6 +72,9 @@ jobs:
     environment: release
     permissions:
       id-token: write   # required for Trusted Publishing (OIDC)
+      contents: read    # job-level permissions REPLACE workflow-level, so we
+                        # must re-grant this for actions/checkout to work
+
     steps:
       - uses: actions/checkout@v4
 
