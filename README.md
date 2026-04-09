@@ -17,8 +17,8 @@ Nobody can tell the difference.
 | **pipx** (recommended) | `pipx install rpr` |
 | **pip**  | `pip install --user rpr` |
 | **Homebrew** | `brew install dedev-llc/rpr/rpr` |
-| **npm**  | `npm install -g rpr` |
-| **npx**  | `npx rpr <pr-number>` |
+| **npm**  | `npm install -g @dedev-llc/rpr` |
+| **npx**  | `npx @dedev-llc/rpr <pr-number>` |
 | **curl** | `curl -fsSL https://raw.githubusercontent.com/dedev-llc/rpr/main/install.sh \| bash` |
 
 All channels install the same `rpr` command. You'll also need:
