@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import time
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -78,6 +79,87 @@ def load_config() -> dict:
                 config.update(json.load(f))
             break
     return config
+
+
+# ---------------------------------------------------------------------------
+# Update check
+# ---------------------------------------------------------------------------
+
+UPDATE_CHECK_INTERVAL = 3600  # seconds between PyPI checks
+
+
+def _update_cache_path() -> Path:
+    cache_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return cache_dir / "rpr" / "update-check.json"
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def check_for_update() -> str | None:
+    """Check PyPI for a newer version. Returns a notification string or None.
+
+    Results are cached for UPDATE_CHECK_INTERVAL seconds so most runs
+    hit a local file instead of the network.
+    """
+    from rpr import __version__
+
+    cache_path = _update_cache_path()
+    latest = None
+
+    # Use cached result if fresh enough
+    try:
+        if cache_path.exists():
+            cache = json.loads(cache_path.read_text())
+            if time.time() - cache.get("checked_at", 0) < UPDATE_CHECK_INTERVAL:
+                latest = cache.get("latest")
+                if latest and _version_tuple(latest) > _version_tuple(__version__):
+                    return _update_msg(__version__, latest)
+                return None
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    # Fetch from PyPI
+    try:
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/rpr/json",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            latest = data["info"]["version"]
+    except Exception:
+        return None
+
+    # Cache the result
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({
+            "checked_at": time.time(),
+            "latest": latest,
+        }))
+    except OSError:
+        pass
+
+    if latest and _version_tuple(latest) > _version_tuple(__version__):
+        return _update_msg(__version__, latest)
+    return None
+
+
+def _update_msg(current: str, latest: str) -> str:
+    line1 = f" Update available: {current} → {latest} "
+    line2 = " pip install -U rpr "
+    width = max(len(line1), len(line2))
+    return (
+        f"\n╭{'─' * width}╮\n"
+        f"│{line1:<{width}}│\n"
+        f"│{line2:<{width}}│\n"
+        f"╰{'─' * width}╯"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +873,15 @@ def main():
     args = parser.parse_args()
     config = load_config()
 
+    # Start update check in background (non-blocking)
+    update_result: list[str | None] = [None]
+
+    def _bg_update_check():
+        update_result[0] = check_for_update()
+
+    update_thread = threading.Thread(target=_bg_update_check, daemon=True)
+    update_thread.start()
+
     if args.model:
         config["model"] = args.model
 
@@ -931,6 +1022,9 @@ def main():
                 print(f"\n📄 {c['path']}:{c['line']}")
                 print(f"   {c['body']}")
         print()
+        update_thread.join(timeout=2)
+        if update_result[0]:
+            print(update_result[0], file=sys.stderr)
         return
 
     if args.comment_only:
@@ -947,6 +1041,11 @@ def main():
         print(f"{action_label[event]} PR #{args.pr_number}", file=sys.stderr)
 
     print(f"🔗 {pr_info.get('url', '')}", file=sys.stderr)
+
+    # Show update notification (if check finished in time)
+    update_thread.join(timeout=2)
+    if update_result[0]:
+        print(update_result[0], file=sys.stderr)
 
 
 if __name__ == "__main__":
