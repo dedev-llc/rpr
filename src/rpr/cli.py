@@ -5,6 +5,8 @@ Stealth PR Reviewer — looks like you wrote every word.
 Usage:
     rpr 42                          # Review PR #42 in current repo
     rpr 42 --repo owner/repo        # Review PR #42 in specific repo
+    rpr 42 --depth quick            # Fast scan: blockers & security only
+    rpr 42 --depth thorough         # Deep review: architecture, style, edge cases
     rpr 42 --comment-only           # Post as a single PR comment (not inline review)
     rpr 42 --dry-run                # Print review to terminal, don't post
     rpr 42 --approve                # Post review + approve the PR
@@ -76,6 +78,48 @@ def load_config() -> dict:
                 config.update(json.load(f))
             break
     return config
+
+
+# ---------------------------------------------------------------------------
+# Review depth modes
+# ---------------------------------------------------------------------------
+
+REVIEW_DEPTHS = {
+    "quick": {
+        "label": "quick",
+        "focus": (
+            "REVIEW DEPTH: QUICK (blockers only)\n"
+            "Only flag issues that would block a merge:\n"
+            "- Bugs that WILL break production\n"
+            "- Security vulnerabilities (injection, auth bypass, data exposure)\n"
+            "- Data loss or corruption risks\n"
+            "- Major architectural violations that are costly to fix later\n\n"
+            "Skip everything else — no nits, no style, no suggestions, no minor edge cases.\n"
+            "If nothing is blocking, approve with a short summary. Keep it fast."
+        ),
+    },
+    "default": {
+        "label": "default",
+        "focus": "",  # uses the standard system prompt as-is
+    },
+    "thorough": {
+        "label": "thorough",
+        "focus": (
+            "REVIEW DEPTH: THOROUGH\n"
+            "Go deep on this one. In addition to the usual focus areas, also look at:\n"
+            "- Architectural fit — does this change belong here? Is the abstraction right?\n"
+            "- Edge cases and boundary conditions, even unlikely ones\n"
+            "- Error messages — are they helpful for debugging?\n"
+            "- Naming clarity — would a new team member understand this code?\n"
+            "- API design — are the interfaces clean and hard to misuse?\n"
+            "- Testability — is this code easy or hard to test?\n"
+            "- Performance at scale — what happens with 10x/100x the data?\n\n"
+            "Be thorough but still prioritize: lead with the important stuff."
+        ),
+    },
+}
+
+VALID_DEPTHS = list(REVIEW_DEPTHS.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +631,9 @@ WHAT TO SKIP:
 - Obvious documentation suggestions
 - Praise for basic competence
 
-{custom_guidelines}"""
+{custom_guidelines}
+
+{depth_focus}"""
 
 USER_PROMPT_TEMPLATE = """\
 Review this pull request.
@@ -642,13 +688,24 @@ Here's the diff:
 {diff}"""
 
 
-def build_prompt(pr_info: dict, diff: str, valid_lines: dict, previous_reviews: str = "") -> tuple:
+def build_prompt(
+    pr_info: dict,
+    diff: str,
+    valid_lines: dict,
+    previous_reviews: str = "",
+    depth: str = "default",
+) -> tuple:
     """Build the system and user prompts."""
     custom_guidelines = get_review_guidelines()
     if custom_guidelines:
         custom_guidelines = f"\nADDITIONAL TEAM GUIDELINES:\n{custom_guidelines}"
 
-    system = SYSTEM_PROMPT.format(custom_guidelines=custom_guidelines)
+    depth_focus = REVIEW_DEPTHS[depth]["focus"]
+
+    system = SYSTEM_PROMPT.format(
+        custom_guidelines=custom_guidelines,
+        depth_focus=depth_focus,
+    )
 
     description = pr_info.get("body") or "(no description)"
     # Truncate long descriptions
@@ -722,6 +779,12 @@ def main():
     parser.add_argument("--comment-only", action="store_true", help="Post as simple comment, not inline review")
     parser.add_argument("--approve", action="store_true", help="Approve the PR with review")
     parser.add_argument("--request-changes", action="store_true", help="Request changes")
+    parser.add_argument(
+        "--depth", "-d",
+        choices=VALID_DEPTHS,
+        default="default",
+        help="Review depth: quick (blockers only), default, thorough (deep analysis)",
+    )
     parser.add_argument("--model", help="Override Claude model")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show debug info")
 
@@ -774,9 +837,11 @@ def main():
         print(f"   Found {nr} prior reviews, {nc} inline comments", file=sys.stderr)
 
     # 5. Build prompt and call Claude
-    system, user = build_prompt(pr_info, diff, valid_lines, previous_section)
+    depth_label = REVIEW_DEPTHS[args.depth]["label"]
+    system, user = build_prompt(pr_info, diff, valid_lines, previous_section, args.depth)
 
-    print(f"🤖 Reviewing with {config['model']}...", file=sys.stderr)
+    depth_tag = f" [{depth_label}]" if args.depth != "default" else ""
+    print(f"🤖 Reviewing with {config['model']}{depth_tag}...", file=sys.stderr)
     raw_response = call_claude(user, system, config)
 
     if args.verbose:
