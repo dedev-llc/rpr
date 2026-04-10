@@ -139,9 +139,9 @@ print_path_hint() {
 print_next_steps() {
   printf "\n"
   printf "%s\n" "${BOLD}Next steps:${RESET}"
-  printf "  1. Set your Anthropic API key:  ${DIM}export ANTHROPIC_API_KEY=sk-ant-...${RESET}\n"
-  printf "  2. Authenticate gh:             ${DIM}gh auth login${RESET}\n"
-  printf "  3. Try a dry-run review:        ${DIM}rpr <pr-number> --dry-run${RESET}\n"
+  printf "  1. Set your Anthropic API key:  %sexport ANTHROPIC_API_KEY=sk-ant-...%s\n" "$DIM" "$RESET"
+  printf "  2. Authenticate gh:             %sgh auth login%s\n" "$DIM" "$RESET"
+  printf "  3. Try a dry-run review:        %srpr <pr-number> --dry-run%s\n" "$DIM" "$RESET"
   printf "\n"
   printf "Docs: https://github.com/%s\n" "${REPO}"
 }
