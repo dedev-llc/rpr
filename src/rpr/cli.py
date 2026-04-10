@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -94,6 +95,18 @@ def run_gh(args: list, repo: str | None = None) -> str:
     return result.stdout
 
 
+def try_run_gh(args: list, repo: str | None = None) -> str | None:
+    """Like run_gh but returns None on failure instead of exiting."""
+    cmd = ["gh"]
+    if repo:
+        cmd += ["--repo", repo]
+    cmd += args
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
 def get_pr_info(pr_number: int, repo: str | None) -> dict:
     """Fetch PR metadata."""
     raw = run_gh(
@@ -121,6 +134,75 @@ def get_pr_files(pr_number: int, repo: str | None) -> list:
         repo,
     )
     return json.loads(raw)
+
+
+def get_previous_reviews(pr_number: int, repo: str | None) -> tuple[list, list]:
+    """Fetch previous reviews and inline comments on the PR."""
+    reviews: list = []
+    comments: list = []
+
+    raw = try_run_gh(
+        ["api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/reviews", "--paginate"],
+        repo,
+    )
+    if raw:
+        try:
+            reviews = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+    raw = try_run_gh(
+        ["api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments", "--paginate"],
+        repo,
+    )
+    if raw:
+        try:
+            comments = json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+    return reviews, comments
+
+
+def format_previous_reviews(reviews: list, comments: list) -> str:
+    """Format previous reviews into a prompt section. Returns '' if none."""
+    if not reviews and not comments:
+        return ""
+
+    parts: list[str] = []
+
+    for r in reviews:
+        body = (r.get("body") or "").strip()
+        if not body:
+            continue
+        user = r.get("user", {}).get("login", "unknown")
+        state = r.get("state", "COMMENTED")
+        parts.append(f"[{user} — {state}]\n{body}")
+
+    for c in comments:
+        body = (c.get("body") or "").strip()
+        if not body:
+            continue
+        user = c.get("user", {}).get("login", "unknown")
+        path = c.get("path", "?")
+        line = c.get("line") or c.get("original_line") or "?"
+        parts.append(f"[{user} on {path}:{line}]\n{body}")
+
+    if not parts:
+        return ""
+
+    section = "PREVIOUS REVIEWS AND COMMENTS ON THIS PR:\n"
+    section += "---\n"
+    section += "\n\n".join(parts)
+    section += "\n---\n\n"
+    section += (
+        "IMPORTANT — when considering previous feedback:\n"
+        "- Do NOT repeat comments that were already made\n"
+        "- If a previous concern has been addressed in the current diff, do not raise it again\n"
+        "- If all previous issues are resolved and no new issues found, use \"approve\"\n"
+        "- Only raise NEW issues not already covered by previous reviews\n\n"
+    )
+    return section
 
 
 def post_review_comment(pr_number: int, body: str, repo: str | None):
@@ -356,6 +438,7 @@ def call_claude(prompt: str, system: str, config: dict) -> str:
         "max_tokens": config["max_tokens"],
         "system": system,
         "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
     }
 
     # Enable adaptive thinking for 4.6 / opus models
@@ -370,13 +453,13 @@ def call_claude(prompt: str, system: str, config: dict) -> str:
             "content-type": "application/json",
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
+            "accept": "text/event-stream",
         },
         method="POST",
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            response = json.loads(resp.read().decode("utf-8"))
+        resp = urllib.request.urlopen(req, timeout=300)
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"❌ Claude API error ({e.code}): {body}", file=sys.stderr)
@@ -385,17 +468,80 @@ def call_claude(prompt: str, system: str, config: dict) -> str:
         print(f"❌ Network error contacting Claude API: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
-    if "error" in response:
-        print(f"❌ Claude API error: {response['error']}", file=sys.stderr)
+    text_content = ""
+    start_time = time.time()
+
+    try:
+        while True:
+            raw_line = resp.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8").strip()
+
+            if not line.startswith("data: "):
+                continue
+
+            data_str = line[6:]
+            if data_str == "[DONE]":
+                break
+
+            try:
+                data = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+
+            event_type = data.get("type")
+
+            if event_type == "content_block_start":
+                block_type = data.get("content_block", {}).get("type")
+                elapsed = time.time() - start_time
+                if block_type == "thinking":
+                    print(
+                        f"\r⏳ Thinking... ({elapsed:.0f}s)          ",
+                        end="", file=sys.stderr, flush=True,
+                    )
+                elif block_type == "text":
+                    print(
+                        f"\r✍️  Writing review...                    ",
+                        end="", file=sys.stderr, flush=True,
+                    )
+
+            elif event_type == "content_block_delta":
+                delta = data.get("delta", {})
+                elapsed = time.time() - start_time
+                if delta.get("type") == "thinking_delta":
+                    print(
+                        f"\r⏳ Thinking... ({elapsed:.0f}s)          ",
+                        end="", file=sys.stderr, flush=True,
+                    )
+                elif delta.get("type") == "text_delta":
+                    text_content += delta.get("text", "")
+                    print(
+                        f"\r✍️  Writing review... ({len(text_content)} chars, {elapsed:.0f}s)     ",
+                        end="", file=sys.stderr, flush=True,
+                    )
+
+            elif event_type == "error":
+                error_msg = data.get("error", {}).get("message", "Unknown error")
+                print(f"\n❌ Claude API stream error: {error_msg}", file=sys.stderr)
+                sys.exit(1)
+
+            elif event_type == "message_stop":
+                break
+    finally:
+        resp.close()
+
+    elapsed = time.time() - start_time
+    print(
+        f"\r✅ Review generated ({elapsed:.1f}s)                              ",
+        file=sys.stderr,
+    )
+
+    if not text_content:
+        print("❌ No text content in Claude's response", file=sys.stderr)
         sys.exit(1)
 
-    # Extract text content, skipping thinking blocks
-    for block in response.get("content", []):
-        if block.get("type") == "text":
-            return block["text"]
-
-    # Fallback
-    return response["content"][0].get("text", "")
+    return text_content
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +598,7 @@ Review this pull request.
 Base: `{base}` ← Head: `{head}`
 {stats}
 
-CHANGED FILES AND LINES (only these are reviewable):
+{previous_reviews_section}CHANGED FILES AND LINES (only these are reviewable):
 {changed_lines_summary}
 
 CRITICAL CONSTRAINT: You may ONLY comment on lines listed above. These are the \
@@ -496,7 +642,7 @@ Here's the diff:
 {diff}"""
 
 
-def build_prompt(pr_info: dict, diff: str, valid_lines: dict) -> tuple:
+def build_prompt(pr_info: dict, diff: str, valid_lines: dict, previous_reviews: str = "") -> tuple:
     """Build the system and user prompts."""
     custom_guidelines = get_review_guidelines()
     if custom_guidelines:
@@ -519,6 +665,7 @@ def build_prompt(pr_info: dict, diff: str, valid_lines: dict) -> tuple:
         head=pr_info.get("headRefName", "?"),
         stats=stats,
         changed_lines_summary=changed_lines_summary,
+        previous_reviews_section=previous_reviews,
         diff=diff,
     )
 
@@ -616,8 +763,18 @@ def main():
         total_changed = sum(len(v) for v in valid_lines.values())
         print(f"   Changed lines: {total_changed} across {len(valid_files)} files", file=sys.stderr)
 
-    # 4. Build prompt and call Claude
-    system, user = build_prompt(pr_info, diff, valid_lines)
+    # 4. Fetch previous reviews for context
+    print("🔍 Checking previous reviews...", file=sys.stderr)
+    prev_reviews, prev_comments = get_previous_reviews(args.pr_number, args.repo)
+    previous_section = format_previous_reviews(prev_reviews, prev_comments)
+
+    if previous_section and args.verbose:
+        nr = len([r for r in prev_reviews if (r.get("body") or "").strip()])
+        nc = len([c for c in prev_comments if (c.get("body") or "").strip()])
+        print(f"   Found {nr} prior reviews, {nc} inline comments", file=sys.stderr)
+
+    # 5. Build prompt and call Claude
+    system, user = build_prompt(pr_info, diff, valid_lines, previous_section)
 
     print(f"🤖 Reviewing with {config['model']}...", file=sys.stderr)
     raw_response = call_claude(user, system, config)
