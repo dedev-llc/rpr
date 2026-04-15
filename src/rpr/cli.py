@@ -958,6 +958,315 @@ def parse_review(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Thread processing — reply to & resolve rpr's own review threads
+# ---------------------------------------------------------------------------
+
+
+def _get_repo_nwo(repo: str | None) -> tuple[str, str] | None:
+    """Get (owner, name) from --repo flag or current repo."""
+    if repo:
+        parts = repo.split("/", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+        return None
+    raw = try_run_gh(
+        ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+        None,
+    )
+    if raw:
+        parts = raw.strip().split("/", 1)
+        if len(parts) == 2:
+            return parts[0], parts[1]
+    return None
+
+
+def _fetch_rpr_threads(pr_number: int, repo: str | None) -> tuple[list, str]:
+    """Fetch unresolved rpr review threads that have human replies.
+
+    Returns (threads, head_oid).
+    """
+    nwo = _get_repo_nwo(repo)
+    if not nwo:
+        return [], ""
+    owner, name = nwo
+
+    query = (
+        "query($owner: String!, $name: String!, $pr: Int!) {"
+        "  repository(owner: $owner, name: $name) {"
+        "    pullRequest(number: $pr) {"
+        "      headRefOid"
+        "      reviewThreads(first: 100) {"
+        "        nodes {"
+        "          id isResolved path line"
+        "          comments(first: 50) {"
+        "            nodes {"
+        "              databaseId body"
+        "              author { login }"
+        "              pullRequestReview { body }"
+        "            }"
+        "          }"
+        "        }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    )
+
+    result = subprocess.run(
+        [
+            "gh", "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}",
+            "-F", f"name={name}",
+            "-F", f"pr={pr_number}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return [], ""
+
+    data = json.loads(result.stdout)
+    pr_data = (
+        data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+    )
+    all_threads = pr_data.get("reviewThreads", {}).get("nodes", [])
+    head_oid = pr_data.get("headRefOid", "HEAD")
+
+    pending = []
+    for t in all_threads:
+        if t.get("isResolved"):
+            continue
+        comments = t.get("comments", {}).get("nodes", [])
+        if len(comments) < 2:
+            continue
+
+        original = comments[0]
+        review_body = (original.get("pullRequestReview") or {}).get("body", "")
+        if RPR_MARKER not in review_body:
+            continue
+
+        human_replies = [
+            c for c in comments[1:]
+            if RPR_MARKER not in (c.get("body") or "")
+        ]
+        if not human_replies:
+            continue
+
+        pending.append({
+            "thread_id": t["id"],
+            "path": t.get("path", ""),
+            "line": t.get("line"),
+            "original_comment": original.get("body", ""),
+            "original_comment_id": original.get("databaseId"),
+            "replies": [
+                {
+                    "author": (r.get("author") or {}).get("login", "?"),
+                    "body": r.get("body", ""),
+                }
+                for r in human_replies
+            ],
+        })
+
+    return pending, head_oid
+
+
+def _fetch_files(paths: list[str], repo: str | None, ref: str) -> dict:
+    """Fetch file contents for the given paths. Returns {path: [lines]}."""
+    import base64
+
+    cache: dict[str, list[str]] = {}
+    for path in set(paths):
+        raw = try_run_gh(
+            [
+                "api",
+                f"repos/{{owner}}/{{repo}}/contents/{path}",
+                "-f", f"ref={ref}",
+                "--jq", ".content",
+            ],
+            repo,
+        )
+        if not raw:
+            continue
+        try:
+            text = base64.b64decode(raw.strip()).decode("utf-8", errors="replace")
+            cache[path] = text.splitlines()
+        except Exception:
+            pass
+    return cache
+
+
+def _file_snippet(
+    path: str, line: int | None, file_cache: dict, context: int = 5,
+) -> str:
+    """Extract a code snippet around a line from cached file content."""
+    if not line or path not in file_cache:
+        return "(code not available)"
+    lines = file_cache[path]
+    start = max(0, line - context - 1)
+    end = min(len(lines), line + context)
+    parts = []
+    for i in range(start, end):
+        marker = ">" if i == line - 1 else " "
+        parts.append(f"{marker} {i + 1}: {lines[i]}")
+    return "\n".join(parts)
+
+
+def _reply_in_thread(
+    pr_number: int, comment_id: int, body: str, repo: str | None,
+):
+    """Post a reply in a review comment thread."""
+    payload = json.dumps({"body": body + "\n" + RPR_MARKER})
+    cmd = _gh_cmd(
+        [
+            "api",
+            f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments/{comment_id}/replies",
+            "--method", "POST",
+            "--input", "-",
+        ],
+        repo,
+    )
+    subprocess.run(cmd, input=payload, capture_output=True, text=True)
+
+
+def _resolve_thread(thread_node_id: str):
+    """Resolve a review thread via GraphQL."""
+    mutation = (
+        "mutation($threadId: ID!) {"
+        "  resolveReviewThread(input: {threadId: $threadId}) {"
+        "    thread { isResolved }"
+        "  }"
+        "}"
+    )
+    subprocess.run(
+        [
+            "gh", "api", "graphql",
+            "-f", f"query={mutation}",
+            "-F", f"threadId={thread_node_id}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+THREAD_SYSTEM_PROMPT = (
+    "You are a senior developer following up on your own code review comments. "
+    "Be natural, brief, and direct — like a real developer replying in a PR thread."
+)
+
+THREAD_USER_PROMPT = """\
+You previously left inline review comments on a PR. Developers have replied \
+to some of them. For each thread, decide whether to resolve it or keep it open.
+
+{threads_text}
+
+Return a JSON array (no markdown fences, no preamble):
+[
+  {{
+    "thread_index": 0,
+    "action": "resolve" | "keep_open",
+    "reply": "Brief reply (1 sentence, natural dev tone)"
+  }}
+]
+
+Guidelines:
+- Developer says "fixed"/"done"/"addressed" AND current code shows the fix \
+→ resolve with brief confirmation ("Looks good now." / "Nice, fixed.")
+- Developer gives a valid technical explanation for why the code is correct \
+→ resolve with acknowledgment ("Fair point." / "Makes sense, my bad.")
+- Developer says "fixed" but the code still has the same issue → keep_open, \
+explain what's still wrong (1-2 sentences)
+- If unclear, lean toward resolving — don't be a blocker on ambiguous threads
+- NEVER start with "I" — vary your openings"""
+
+
+def _parse_thread_decisions(raw: str) -> list:
+    """Parse Claude's thread-processing response as a JSON array."""
+    text = raw.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                pass
+    return []
+
+
+def process_rpr_threads(pr_number: int, repo: str | None, config: dict) -> int:
+    """Check replies to rpr's review threads, verify, reply, and resolve.
+
+    Returns the number of threads resolved.
+    """
+    pending, head_oid = _fetch_rpr_threads(pr_number, repo)
+    if not pending:
+        return 0
+
+    print(f"   Found {len(pending)} thread(s) with replies", file=sys.stderr)
+
+    # Fetch current file contents for verification
+    paths = [t["path"] for t in pending if t.get("path")]
+    file_cache = _fetch_files(paths, repo, head_oid)
+
+    # Build the prompt
+    thread_parts = []
+    for i, t in enumerate(pending):
+        snippet = _file_snippet(t["path"], t["line"], file_cache)
+        replies = "\n".join(
+            f"    {r['author']}: {r['body']}" for r in t["replies"]
+        )
+        thread_parts.append(
+            f"Thread {i}:\n"
+            f"  File: {t['path']}, Line: {t['line']}\n"
+            f"  Your comment: {t['original_comment']}\n"
+            f"  Replies:\n{replies}\n"
+            f"  Current code:\n{snippet}"
+        )
+
+    threads_text = "\n\n".join(thread_parts)
+    prompt = THREAD_USER_PROMPT.format(threads_text=threads_text)
+
+    print("   Verifying with Claude...", file=sys.stderr)
+    raw = call_claude(prompt, THREAD_SYSTEM_PROMPT, config)
+
+    decisions = _parse_thread_decisions(raw)
+    if not decisions:
+        return 0
+
+    resolved = 0
+    for d in decisions:
+        idx = d.get("thread_index", -1)
+        if idx < 0 or idx >= len(pending):
+            continue
+
+        thread = pending[idx]
+        reply_text = d.get("reply", "")
+
+        if reply_text:
+            _reply_in_thread(
+                pr_number, thread["original_comment_id"], reply_text, repo,
+            )
+
+        if d.get("action") == "resolve":
+            _resolve_thread(thread["thread_id"])
+            resolved += 1
+
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1043,6 +1352,13 @@ def main():
         nr = len([r for r in prev_reviews if (r.get("body") or "").strip()])
         nc = len([c for c in prev_comments if (c.get("body") or "").strip()])
         print(f"   Found {nr} prior reviews, {nc} inline comments", file=sys.stderr)
+
+    # 4b. Process replies to rpr's previous review threads
+    if not args.dry_run:
+        print("💬 Checking thread replies...", file=sys.stderr)
+        threads_resolved = process_rpr_threads(args.pr_number, args.repo, config)
+        if threads_resolved:
+            print(f"   ✅ Resolved {threads_resolved} thread(s)", file=sys.stderr)
 
     # 5. Build prompt and call Claude
     depth_label = REVIEW_DEPTHS[args.depth]["label"]
