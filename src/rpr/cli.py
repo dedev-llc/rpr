@@ -389,6 +389,9 @@ def get_previous_reviews(pr_number: int, repo: str | None) -> tuple[list, list]:
     return reviews, comments
 
 
+RPR_MARKER = "<!-- rpr -->"
+
+
 def format_previous_reviews(reviews: list, comments: list) -> str:
     """Format previous reviews into a prompt section. Returns '' if none."""
     if not reviews and not comments:
@@ -398,15 +401,25 @@ def format_previous_reviews(reviews: list, comments: list) -> str:
 
     for r in reviews:
         body = (r.get("body") or "").strip()
-        if not body:
+        if not body or RPR_MARKER in body:
             continue
         user = r.get("user", {}).get("login", "unknown")
         state = r.get("state", "COMMENTED")
         parts.append(f"[{user} — {state}]\n{body}")
 
+    # Collect review IDs that came from rpr so we can skip their inline comments
+    rpr_review_ids = {
+        r.get("id")
+        for r in reviews
+        if RPR_MARKER in (r.get("body") or "")
+    }
+
     for c in comments:
         body = (c.get("body") or "").strip()
-        if not body:
+        if not body or RPR_MARKER in body:
+            continue
+        # Skip inline comments that belong to an rpr review
+        if c.get("pull_request_review_id") in rpr_review_ids:
             continue
         user = c.get("user", {}).get("login", "unknown")
         path = c.get("path", "?")
@@ -432,7 +445,7 @@ def format_previous_reviews(reviews: list, comments: list) -> str:
 
 def post_review_comment(pr_number: int, body: str, repo: str | None):
     """Post a simple comment on the PR (not an inline review)."""
-    run_gh(["pr", "comment", str(pr_number), "--body", body], repo)
+    run_gh(["pr", "comment", str(pr_number), "--body", body + "\n" + RPR_MARKER], repo)
 
 
 def post_review(
@@ -446,8 +459,8 @@ def post_review(
     Submit a pull request review with optional inline comments.
     event: COMMENT | APPROVE | REQUEST_CHANGES
     """
-    # Build the review payload
-    payload = {"event": event, "body": body}
+    # Build the review payload (marker lets future runs skip our own reviews)
+    payload = {"event": event, "body": body + "\n" + RPR_MARKER}
 
     if comments:
         payload["comments"] = []
