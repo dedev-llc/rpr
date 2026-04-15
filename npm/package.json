@@ -1,6 +1,6 @@
 {
   "name": "@dedev-llc/rpr",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Stealth PR reviewer — looks like you wrote every word.",
   "keywords": [
     "pr",
