@@ -1,0 +1,81 @@
+name: manual-release
+
+# Trigger from GitHub UI: Actions → manual-release → Run workflow.
+# Bumps the version (patch/minor/major), commits to main, then triggers
+# the existing release workflow which publishes to PyPI, npm, and Homebrew.
+#
+# NOTE: If branch-protection rules block the push, add "github-actions[bot]"
+# as a bypass actor in the ruleset.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  actions: write          # needed to trigger release.yml
+
+concurrency:
+  group: manual-release
+  cancel-in-progress: false
+
+jobs:
+  bump-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Compute next version
+        id: version
+        run: |
+          set -euo pipefail
+          current=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          echo "Current version: $current"
+
+          IFS='.' read -r major minor patch <<< "$current"
+
+          case "${{ inputs.bump }}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+
+          new="${major}.${minor}.${patch}"
+          echo "Next version: $new"
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Bump version files
+        run: bash scripts/bump.sh "${{ steps.version.outputs.version }}"
+
+      - name: Commit and push to main
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml npm/package.json src/rpr/__init__.py
+          git commit -m "release v${{ steps.version.outputs.version }}"
+          git push origin main
+
+      - name: Trigger release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release.yml
