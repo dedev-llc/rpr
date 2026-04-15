@@ -11,6 +11,7 @@ Usage:
     rpr 42 --dry-run                # Print review to terminal, don't post
     rpr 42 --approve                # Post review + approve the PR
     rpr 42 --request-changes        # Post review + request changes
+    rpr update                      # Self-update to latest version
 """
 
 # Postpones evaluation of annotations so PEP 604 syntax (e.g. `str | None`)
@@ -27,6 +28,22 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+def _get_version() -> str:
+    """Return the package version, with a fallback for npm-installed layout."""
+    try:
+        from rpr import __version__
+        return __version__
+    except ImportError:
+        # npm shim runs cli.py directly; __init__.py sits alongside it in lib/
+        init_file = Path(__file__).parent / "__init__.py"
+        if init_file.exists():
+            for line in init_file.read_text().splitlines():
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        return "unknown"
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -106,7 +123,7 @@ def check_for_update() -> str | None:
     Results are cached for UPDATE_CHECK_INTERVAL seconds so most runs
     hit a local file instead of the network.
     """
-    from rpr import __version__
+    __version__ = _get_version()
 
     cache_path = _update_cache_path()
     latest = None
@@ -152,7 +169,7 @@ def check_for_update() -> str | None:
 
 def _update_msg(current: str, latest: str) -> str:
     line1 = f" Update available: {current} → {latest} "
-    line2 = " pip install -U rpr "
+    line2 = " Run: rpr update "
     width = max(len(line1), len(line2))
     return (
         f"\n╭{'─' * width}╮\n"
@@ -160,6 +177,88 @@ def _update_msg(current: str, latest: str) -> str:
         f"│{line2:<{width}}│\n"
         f"╰{'─' * width}╯"
     )
+
+
+def _detect_update_command() -> list[str]:
+    """Detect how rpr was installed and return the appropriate update command."""
+    # Check pipx
+    try:
+        result = subprocess.run(
+            ["pipx", "list", "--short"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and "rpr " in result.stdout:
+            return ["pipx", "upgrade", "rpr"]
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    # Check brew
+    try:
+        result = subprocess.run(
+            ["brew", "list", "rpr"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return ["brew", "upgrade", "rpr"]
+    except (FileNotFoundError, PermissionError):
+        pass
+
+    # Check npm (script lives inside node_modules or npm prefix)
+    script_path = str(Path(sys.argv[0]).resolve())
+    if "node_modules" in script_path or "/npm/" in script_path:
+        return ["npm", "update", "-g", "@dedev-llc/rpr"]
+
+    # Default to pip
+    return [sys.executable, "-m", "pip", "install", "-U", "rpr"]
+
+
+def _fetch_latest_version() -> str:
+    """Fetch latest version string from PyPI. Raises on failure."""
+    req = urllib.request.Request(
+        "https://pypi.org/pypi/rpr/json",
+        headers={"Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return data["info"]["version"]
+
+
+def handle_update():
+    """Self-update rpr to the latest version."""
+    __version__ = _get_version()
+
+    print(f"rpr v{__version__}", file=sys.stderr)
+    print("Checking for updates...", file=sys.stderr)
+
+    try:
+        latest = _fetch_latest_version()
+    except Exception as e:
+        print(f"❌ Failed to check PyPI: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if _version_tuple(latest) <= _version_tuple(__version__):
+        print(f"✅ Already up to date.", file=sys.stderr)
+        return
+
+    print(f"Updating: {__version__} → {latest}", file=sys.stderr)
+
+    cmd = _detect_update_command()
+    print(f"Running: {' '.join(cmd)}\n", file=sys.stderr)
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print(f"\n❌ Update failed (exit code {result.returncode})", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n✅ Updated to v{latest}", file=sys.stderr)
+
+    # Clear the update cache so the notification doesn't linger
+    try:
+        cache = _update_cache_path()
+        if cache.exists():
+            cache.unlink()
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +950,11 @@ def parse_review(raw: str) -> dict:
 
 
 def main():
+    # Handle `rpr update` before argparse (which expects an int positional)
+    if len(sys.argv) >= 2 and sys.argv[1] == "update":
+        handle_update()
+        return
+
     parser = argparse.ArgumentParser(
         prog="rpr",
         description="Stealth PR Reviewer — looks like you wrote every word.",

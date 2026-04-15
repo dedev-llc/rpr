@@ -39,6 +39,14 @@ rpr 42 --comment-only                    # Post as single comment (no inline)
 rpr 42 --repo owner/repo                 # Specify repo explicitly
 rpr 42 --model claude-sonnet-4-6         # Override model
 rpr 42 -v                                # Verbose mode (debug)
+
+# Review depth:
+rpr 42 --depth quick                     # Blockers & security only (fast)
+rpr 42 --depth thorough                  # Deep: architecture, edge cases, scale
+rpr 42                                   # Default depth (balanced)
+
+# Self-update:
+rpr update                               # Update to latest version
 ```
 
 ### Recommended Workflow
@@ -54,6 +62,22 @@ rpr 42 -v                                # Verbose mode (debug)
    ```
 
 3. Optionally tweak a word or two in the posted review for your personal touch.
+
+### Review Depth
+
+Control how deep the review goes with `--depth` / `-d`:
+
+| Depth | Flag | What gets flagged |
+|---|---|---|
+| **quick** | `-d quick` | Production bugs, security vulnerabilities, data loss risks, major architectural violations. Skips nits and style. |
+| **default** | *(omit flag)* | Bugs, security, performance, error handling, concurrency, resource leaks. Skips style preferences and obvious suggestions. |
+| **thorough** | `-d thorough` | Everything in default, plus architecture fit, edge cases, naming clarity, API design, testability, and performance at scale. |
+
+```bash
+rpr 42 -d quick      # Quick scan before a fast merge
+rpr 42               # Standard review (default)
+rpr 42 -d thorough   # Critical code path — go deep
+```
 
 ## Configuration
 
