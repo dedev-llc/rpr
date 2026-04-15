@@ -29,6 +29,22 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+
+def _get_version() -> str:
+    """Return the package version, with a fallback for npm-installed layout."""
+    try:
+        from rpr import __version__
+        return __version__
+    except ImportError:
+        # npm shim runs cli.py directly; __init__.py sits alongside it in lib/
+        init_file = Path(__file__).parent / "__init__.py"
+        if init_file.exists():
+            for line in init_file.read_text().splitlines():
+                if line.startswith("__version__"):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+        return "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -107,7 +123,7 @@ def check_for_update() -> str | None:
     Results are cached for UPDATE_CHECK_INTERVAL seconds so most runs
     hit a local file instead of the network.
     """
-    from rpr import __version__
+    __version__ = _get_version()
 
     cache_path = _update_cache_path()
     latest = None
@@ -209,7 +225,7 @@ def _fetch_latest_version() -> str:
 
 def handle_update():
     """Self-update rpr to the latest version."""
-    from rpr import __version__
+    __version__ = _get_version()
 
     print(f"rpr v{__version__}", file=sys.stderr)
     print("Checking for updates...", file=sys.stderr)
