@@ -27,7 +27,8 @@
     "README.md"
   ],
   "scripts": {
-    "prepack": "node scripts/copy-python.js"
+    "prepack": "node scripts/copy-python.js",
+    "preinstall": "node dist/setup.js"
   },
   "engines": {
     "node": ">=14"

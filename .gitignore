@@ -38,7 +38,6 @@ node_modules/
 
 # --- Editors / IDEs ---
 .idea/
-.vscode/
 *.swp
 *.swo
 *~
@@ -49,8 +48,6 @@ node_modules/
 .LSOverride
 
 # --- Project-local secrets ---
-.env
-.env.local
 *.local.json
 
 # --- Claude Code ---
@@ -60,3 +57,8 @@ node_modules/
 # --- Logs ---
 *.log
 logs/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
+config.bat
