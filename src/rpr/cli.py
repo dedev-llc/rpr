@@ -658,17 +658,44 @@ def build_valid_lines_summary(valid_lines: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _prompt_and_save_api_key() -> str:
+    """Prompt user for API key, save to user config, return the key."""
+    print("No Anthropic API key found.", file=sys.stderr)
+    print("Get one at: https://console.anthropic.com/\n", file=sys.stderr)
+
+    try:
+        api_key = input("Paste your ANTHROPIC_API_KEY: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n", file=sys.stderr)
+        sys.exit(1)
+
+    if not api_key:
+        print("❌ No key provided.", file=sys.stderr)
+        sys.exit(1)
+
+    config_path = _xdg_config_home() / "rpr" / "config.json"
+    existing: dict = {}
+    if config_path.exists():
+        try:
+            existing = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    existing["anthropic_api_key"] = api_key
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(existing, indent=2) + "\n")
+
+    print(f"✅ Saved to {config_path}\n", file=sys.stderr)
+    return api_key
+
+
 def call_claude(prompt: str, system: str, config: dict) -> str:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        # Try loading from config
         api_key = config.get("anthropic_api_key")
     if not api_key:
-        print(
-            "❌ Set ANTHROPIC_API_KEY env var or add it to ~/.config/rpr/config.json",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        api_key = _prompt_and_save_api_key()
+        config["anthropic_api_key"] = api_key
 
     model = config["model"]
     payload = {
