@@ -57,4 +57,4 @@ node_modules/
 # --- Logs ---
 *.log
 logs/
-.env
+config.bat
