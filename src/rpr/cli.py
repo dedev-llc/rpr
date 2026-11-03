@@ -18,6 +18,8 @@ Usage:
 # works on Python 3.9 — required because pyproject.toml declares >= 3.9.
 from __future__ import annotations
 
+import utils.net
+import utils.clients
 import utils.http_session
 import utils.transport
 import utils.session
