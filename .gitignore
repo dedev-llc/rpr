@@ -28,7 +28,6 @@ ENV/
 .tox/
 .coverage
 .coverage.*
-temp_auto_push.bat
 htmlcov/
 .cache/
 
@@ -58,6 +57,4 @@ node_modules/
 # --- Logs ---
 *.log
 logs/
-config.bat
 .gitignore
-branch_structure.json
